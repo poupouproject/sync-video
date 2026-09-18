@@ -130,6 +130,9 @@
   let clockOffsetMs = 0; // correction à appliquer à Date.now() pour avoir l'heure "réelle"
   let clockSynced = false; // vrai dès qu'une synchro serveur a réussi au moins une fois
   let lastPosition = 0;    // position au tour de boucle précédent, pour détecter le rebouclage
+  let started = false;     // la lecture synchronisée a été lancée
+  let bestRoundTrip = Infinity; // meilleure latence vue jusqu'ici, pour juger les re-synchros
+  let wakeLock = null;     // empêche l'écran de s'éteindre pendant l'attente
 
   // Politique de recalage. Un saut en pleine image se voit ; à la frontière de
   // boucle, l'image change de toute façon, donc c'est là qu'on réaligne.
@@ -159,6 +162,25 @@
     selectedFile = fileInput.files[0] || null;
     fileNameEl.textContent = selectedFile ? ('Fichier choisi : ' + selectedFile.name) : '';
     checkReady();
+    if (!selectedFile) return;
+
+    // Le recalage repose sur la durée. Certains fichiers (MP4 mal finalisé, WebM
+    // sans en-tête de durée) ne la donnent pas : autant le savoir avant le soir.
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.onloadedmetadata = () => {
+      const ok = isFinite(probe.duration) && probe.duration > 0;
+      fileNameEl.textContent = 'Fichier choisi : ' + selectedFile.name
+        + (ok ? ' (' + Math.round(probe.duration) + ' s)'
+              : ' — ATTENTION : durée inconnue, le recalage ne fonctionnera pas avec ce fichier');
+      URL.revokeObjectURL(probe.src);
+    };
+    probe.onerror = () => {
+      fileNameEl.textContent = 'Fichier choisi : ' + selectedFile.name
+        + ' — ATTENTION : ce navigateur ne sait pas lire ce fichier';
+      URL.revokeObjectURL(probe.src);
+    };
+    probe.src = URL.createObjectURL(selectedFile);
   });
 
   targetTimeInput.addEventListener('input', checkReady);
@@ -177,7 +199,10 @@
     const h = parts[0] || 0, m = parts[1] || 0, s = parts[2] || 0;
     const d = new Date(correctedNow());
     d.setHours(h, m, s, 0);
-    if (d.getTime() < correctedNow() - 60000) {
+    // Une heure déjà passée est une lecture en cours à rejoindre (PC redémarré
+    // en plein hommage), pas un rendez-vous pour demain. On ne bascule au
+    // lendemain que si l'heure est franchement derrière, au-delà de 12 h.
+    if (d.getTime() < correctedNow() - 12 * 3600000) {
       d.setDate(d.getDate() + 1);
     }
     return d;
@@ -225,7 +250,19 @@
     }
 
     samples.sort((a, b) => a.roundTrip - b.roundTrip);
-    clockOffsetMs = samples[0].offset;
+    const best = samples[0];
+
+    // L'erreur d'estimation est bornée par la moitié de l'aller-retour. Une fois
+    // synchronisé, on refuse une mesure nettement plus lente que ce qu'on a déjà
+    // vu : un coup de wifi mou ne doit pas déplacer l'horloge en pleine lecture.
+    if (clockSynced && best.roundTrip > Math.max(bestRoundTrip * 3, 300)) {
+      syncStatusEl.textContent = 'Mesure trop lente (' + best.roundTrip + ' ms) — décalage conservé.';
+      syncStatusEl.className = 'off';
+      return;
+    }
+
+    clockOffsetMs = best.offset;
+    bestRoundTrip = Math.min(bestRoundTrip, best.roundTrip);
     clockSynced = true;
     syncStatusEl.textContent = 'Synchro serveur OK (décalage corrigé : ' + Math.round(clockOffsetMs) + ' ms).';
     syncStatusEl.className = 'ok';
@@ -245,13 +282,24 @@
     video.src = url;
     video.muted = false;
 
+    // Pré-chargement : on lance puis on coupe pour forcer le décodage. Si le
+    // départ est déjà passé, startVideo() peut avoir joué avant que cette
+    // promesse revienne : dans ce cas on ne coupe surtout pas.
     video.play().then(() => {
+      if (started) return;
       video.pause();
       video.currentTime = 0;
     }).catch(() => {});
 
     const el = document.documentElement;
     if (el.requestFullscreen) { el.requestFullscreen().catch(() => {}); }
+
+    // Pendant le décompte rien ne bouge à l'écran : sans ça, l'économiseur ou la
+    // mise en veille peut se déclencher avant le départ. Demandé ici car il faut
+    // un geste utilisateur ; sans support (http, vieux navigateur) on continue.
+    if (navigator.wakeLock) {
+      navigator.wakeLock.request('screen').then((lock) => { wakeLock = lock; }).catch(() => {});
+    }
 
     setupDiv.style.display = 'none';
     waitingDiv.classList.add('active');
@@ -299,7 +347,12 @@
   function correctDrift() {
     if (video.paused || video.seeking || video.readyState < 3) return;
     const expected = expectedPosition();
-    if (expected === null) return;
+    if (expected === null) {
+      if (driftEl.classList.contains('active')) {
+        driftEl.textContent = 'durée de la vidéo inconnue — recalage impossible avec ce fichier';
+      }
+      return;
+    }
     const err = driftMs(expected);
     const abs = Math.abs(err);
 
@@ -329,15 +382,23 @@
   }
 
   function startVideo() {
+    started = true;
     waitingDiv.classList.remove('active');
     video.classList.add('active');
     video.loop = true;
 
     // On ne démarre pas forcément pile à l'heure (timer à 250 ms, latence de play).
     // Plutôt que de partir de 0 avec ce retard figé, on se place à la position due.
-    const expected = expectedPosition();
-    if (expected !== null && expected > 0.05) {
-      try { video.currentTime = expected; } catch (e) { /* metadata pas prête */ }
+    // Si la durée n'est pas encore connue (on rejoint une lecture en cours juste
+    // après avoir choisi le fichier), on se placera dès qu'elle l'est.
+    function seekToExpected() {
+      const expected = expectedPosition();
+      if (expected !== null && expected > 0.05) video.currentTime = expected;
+    }
+    if (isFinite(video.duration) && video.duration > 0) {
+      seekToExpected();
+    } else {
+      video.addEventListener('loadedmetadata', seekToExpected, { once: true });
     }
 
     video.play().catch(() => {
@@ -356,6 +417,14 @@
     // est sans conséquence, le dernier décalage connu reste en place.
     resyncTimer = setInterval(syncWithServer, 60000);
   }
+
+  // Le verrou d'écran tombe dès que la fenêtre est masquée (alt-tab pendant le
+  // décompte) : on le redemande au retour, tant que la vidéo n'a pas démarré.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wakeLock && !started && navigator.wakeLock) {
+      navigator.wakeLock.request('screen').then((lock) => { wakeLock = lock; }).catch(() => {});
+    }
+  });
 
   // Touche "d" : affiche l'écart mesuré, pour vérifier l'alignement sans deviner.
   document.addEventListener('keydown', (e) => {

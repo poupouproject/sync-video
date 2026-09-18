@@ -108,7 +108,16 @@ Deux autres conséquences utiles :
   place d'emblée à la position due.
 - L'horloge du PC est re-synchronisée sur le serveur chaque minute pendant la
   lecture. Un échec réseau est sans conséquence : le dernier décalage connu reste
-  en place, jamais de retour brutal à zéro.
+  en place, jamais de retour brutal à zéro. Une mesure nettement plus lente que
+  les précédentes (coup de wifi mou) est refusée, pour que l'horloge ne bouge pas
+  en pleine lecture sur une mauvaise mesure.
+- **Un PC qui plante peut rejoindre.** Relance la page, rechoisis le fichier,
+  remets la même heure de départ — même si elle est passée depuis 20 minutes. La
+  page comprend que la lecture est en cours et se place directement à la bonne
+  image. (Une heure passée de plus de 12 h est lue comme « demain ».)
+- L'écran ne s'éteint pas pendant le décompte : la page demande un verrou d'écran
+  au moment de « Préparer ». Ça exige HTTPS, donc l'URL Vercel ; en `file://`
+  depuis la clé, règle la mise en veille de Windows à la main.
 
 **Vérifier sur place :** appuie sur la touche `d` pendant la lecture. Un petit
 indicateur affiche l'écart mesuré, la vitesse appliquée et le décalage serveur.
@@ -121,6 +130,28 @@ curl https://sync-video-hommage-xxxx.vercel.app/api/time
 ```
 
 Doit retourner quelque chose comme `{"serverTime":1234567890123}`.
+
+## Checklist avant le soir
+
+Ce que la page ne peut pas vérifier à ta place :
+
+- **Le même fichier sur les deux PC.** Le recalage suppose la même durée. Deux
+  exports différents du montage = deux durées = deux vidéos qui ne resteront pas
+  alignées. Compare la durée affichée sous « Fichier choisi ».
+- **Copie le fichier sur le disque du PC** plutôt que de le lire depuis la clé.
+  Une clé lente peut faire décrocher la lecture ; le recalage rattrape, mais par
+  un saut.
+- **Même fuseau horaire sur les deux PC.** L'heure de départ est saisie en heure
+  locale ; un PC en heure de Montréal et l'autre en UTC ne visent pas le même
+  instant.
+- **Utilise l'URL de production** (`vercel --prod`), pas une URL de preview :
+  les previews Vercel demandent une connexion et la page ne se chargerait pas.
+- **Fais un vrai test complet la veille**, avec les deux PC et le vrai fichier :
+  départ dans 3 min, laisse tourner deux tours de boucle, touche `d` pour lire
+  l'écart sur chacun. C'est le seul test qui vaut.
+- Si le message « durée inconnue » ou « ce navigateur ne sait pas lire ce
+  fichier » apparaît sous le nom du fichier, réexporte en MP4 H.264/AAC : c'est le
+  format que tous les navigateurs lisent et dont ils connaissent la durée.
 
 ## Si pas d'internet au salon
 
