@@ -19,6 +19,7 @@
   .sub { color: #aaa; margin-bottom: 24px; }
   .step { margin: 16px 0; max-width: 460px; }
   .step label { display:block; margin-bottom:8px; font-size:16px; color:#ddd; }
+  .hint { color: #777; font-size: 13px; margin-top: 8px; }
   input[type="file"], input[type="time"] {
     font-size: 16px; padding: 8px; background:#111; color:#fff;
     border:1px solid #444; border-radius:6px; width: 100%;
@@ -85,6 +86,8 @@
       <button class="secondary" id="setPlus5">Départ dans 5 min</button>
       <button class="secondary" id="setPlus10">Départ dans 10 min</button>
     </div>
+    <div class="hint">Les boutons arrondissent à la minute pleine. Appuie sur le même bouton sur les deux PC
+      dans la même minute, puis vérifie que l'heure affichée est identique sur les deux écrans.</div>
   </div>
 
   <button id="prepareBtn" disabled>3. Préparer et attendre le départ</button>
@@ -186,8 +189,15 @@
   targetTimeInput.addEventListener('input', checkReady);
 
   function setInMinutes(mins) {
+    // Arrondi à la minute pleine suivante. Sans ça, « dans 5 min » pressé à
+    // 19:52:40 sur un PC et à 19:52:55 sur l'autre donnerait deux heures de
+    // départ différentes de 15 s — et les deux lectures resteraient décalées
+    // d'autant toute la soirée. Avec l'arrondi, pressé dans la même minute sur
+    // les deux PC, on obtient exactement la même heure.
     const d = new Date(correctedNow() + mins * 60000);
-    targetTimeInput.value = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    d.setSeconds(0, 0);
+    d.setMinutes(d.getMinutes() + 1);
+    targetTimeInput.value = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':00';
     checkReady();
   }
   document.getElementById('setPlus3').addEventListener('click', () => setInMinutes(3));
