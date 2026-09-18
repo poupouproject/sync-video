@@ -56,6 +56,13 @@
     background: #000;
   }
   video.active { display: block; }
+
+  #drift {
+    display: none; position: fixed; bottom: 12px; right: 14px; z-index: 10;
+    font: 13px/1.4 Consolas, monospace; color: #7ecb9a;
+    background: rgba(0,0,0,.6); padding: 6px 10px; border-radius: 6px;
+  }
+  #drift.active { display: block; }
 </style>
 </head>
 <body>
@@ -93,6 +100,7 @@
 </div>
 
 <video id="video" loop playsinline></video>
+<div id="drift"></div>
 
 <script>
   // Le service de synchro est déployé avec cette page : même origine, donc chemin relatif.
@@ -112,11 +120,23 @@
   const liveClock2El = document.getElementById('liveClock2');
   const fileNameEl = document.getElementById('fileName');
   const video = document.getElementById('video');
+  const driftEl = document.getElementById('drift');
 
   let selectedFile = null;
   let targetDate = null;
   let countdownTimer = null;
+  let driftTimer = null;
+  let resyncTimer = null;
   let clockOffsetMs = 0; // correction à appliquer à Date.now() pour avoir l'heure "réelle"
+  let clockSynced = false; // vrai dès qu'une synchro serveur a réussi au moins une fois
+  let lastPosition = 0;    // position au tour de boucle précédent, pour détecter le rebouclage
+
+  // Politique de recalage. Un saut en pleine image se voit ; à la frontière de
+  // boucle, l'image change de toute façon, donc c'est là qu'on réaligne.
+  const DRIFT_OK_MS = 40;      // ~1 image : sous ce seuil on ne touche à rien
+  const NUDGE_RATE = 0.02;     // rattrapage doux en cours de plan (0 = ne rien faire hors boucle)
+  const DRIFT_PANIC_MS = 2000; // décrochage franc : on saute sans attendre la boucle
+                               // (Infinity = ne jamais sauter ailleurs qu'à la boucle)
 
   function pad(n) { return String(n).padStart(2, '0'); }
   function correctedNow() { return Date.now() + clockOffsetMs; }
@@ -166,7 +186,7 @@
   // --- Synchro d'horloge via le serveur (style NTP simplifié) ---
   async function syncWithServer() {
     if (location.protocol === 'file:' && SYNC_URL.startsWith('/')) {
-      clockOffsetMs = 0;
+      if (!clockSynced) clockOffsetMs = 0;
       syncStatusEl.textContent = 'Page ouverte en local — synchro par horloge locale des deux PC.';
       syncStatusEl.className = 'off';
       return;
@@ -194,14 +214,19 @@
     }
 
     if (samples.length === 0) {
-      clockOffsetMs = 0;
-      syncStatusEl.textContent = 'Serveur injoignable — repli sur l\'horloge locale des deux PC.';
+      // Un échec ne doit jamais remettre l'offset à zéro : pendant la lecture ça
+      // provoquerait un saut brutal. On garde le dernier décalage connu.
+      if (!clockSynced) clockOffsetMs = 0;
+      syncStatusEl.textContent = clockSynced
+        ? 'Serveur injoignable — on garde le dernier décalage connu.'
+        : 'Serveur injoignable — repli sur l\'horloge locale des deux PC.';
       syncStatusEl.className = 'off';
       return;
     }
 
     samples.sort((a, b) => a.roundTrip - b.roundTrip);
     clockOffsetMs = samples[0].offset;
+    clockSynced = true;
     syncStatusEl.textContent = 'Synchro serveur OK (décalage corrigé : ' + Math.round(clockOffsetMs) + ' ms).';
     syncStatusEl.className = 'ok';
   }
@@ -249,10 +274,72 @@
     countdownEl.textContent = pad(mm) + ':' + pad(ss);
   }
 
+  // --- Recalage pendant la lecture ---
+  // La position de lecture n'est jamais déduite de "on a démarré, donc ça suit" :
+  // elle est recalculée depuis l'heure corrigée. Deux PC qui partagent la même
+  // heure de départ et la même durée de vidéo visent donc toujours la même image,
+  // y compris après plusieurs tours de boucle.
+  function expectedPosition() {
+    const d = video.duration;
+    if (!isFinite(d) || d <= 0) return null;
+    const elapsedSec = (correctedNow() - targetDate.getTime()) / 1000;
+    if (elapsedSec < 0) return null;
+    return elapsedSec % d;
+  }
+
+  // Écart en ms, positif si on est en avance. Calculé de façon circulaire pour que
+  // la frontière de boucle (fin -> début) ne soit pas lue comme un écart énorme.
+  function driftMs(expected) {
+    const d = video.duration;
+    let err = (((video.currentTime - expected) % d) + d) % d;
+    if (err > d / 2) err -= d;
+    return err * 1000;
+  }
+
+  function correctDrift() {
+    if (video.paused || video.seeking || video.readyState < 3) return;
+    const expected = expectedPosition();
+    if (expected === null) return;
+    const err = driftMs(expected);
+    const abs = Math.abs(err);
+
+    // La lecture est repartie en arrière : on vient de reboucler. C'est le moment
+    // où un saut ne coûte rien, puisque l'image change déjà.
+    const wrapped = video.currentTime < lastPosition - 1;
+    lastPosition = video.currentTime;
+
+    if (abs <= DRIFT_OK_MS) {
+      video.playbackRate = 1;
+    } else if (wrapped || abs > DRIFT_PANIC_MS) {
+      video.playbackRate = 1;
+      video.currentTime = expected;
+    } else if (NUDGE_RATE > 0) {
+      // Hors boucle on ne saute jamais : on est en avance -> ralentir, en retard
+      // -> accélérer. 2 % ne s'entend pas et se rattrape en quelques secondes.
+      video.playbackRate = err > 0 ? 1 - NUDGE_RATE : 1 + NUDGE_RATE;
+    } else {
+      video.playbackRate = 1; // recalage remis au prochain tour de boucle
+    }
+
+    if (driftEl.classList.contains('active')) {
+      driftEl.textContent = 'écart ' + (err > 0 ? '+' : '') + Math.round(err) + ' ms'
+        + ' · vitesse ' + video.playbackRate.toFixed(2)
+        + ' · offset serveur ' + Math.round(clockOffsetMs) + ' ms';
+    }
+  }
+
   function startVideo() {
     waitingDiv.classList.remove('active');
     video.classList.add('active');
     video.loop = true;
+
+    // On ne démarre pas forcément pile à l'heure (timer à 250 ms, latence de play).
+    // Plutôt que de partir de 0 avec ce retard figé, on se place à la position due.
+    const expected = expectedPosition();
+    if (expected !== null && expected > 0.05) {
+      try { video.currentTime = expected; } catch (e) { /* metadata pas prête */ }
+    }
+
     video.play().catch(() => {
       video.addEventListener('click', () => video.play(), { once: true });
     });
@@ -260,7 +347,20 @@
     if (el.requestFullscreen && !document.fullscreenElement) {
       el.requestFullscreen().catch(() => {});
     }
+
+    // Sondage fréquent pour attraper le rebouclage dans les premières images du
+    // tour suivant ; ce n'est pas pour autant une correction plus fréquente.
+    lastPosition = video.currentTime;
+    driftTimer = setInterval(correctDrift, 250);
+    // L'horloge du PC dérive aussi : on retape le serveur régulièrement. Un échec
+    // est sans conséquence, le dernier décalage connu reste en place.
+    resyncTimer = setInterval(syncWithServer, 60000);
   }
+
+  // Touche "d" : affiche l'écart mesuré, pour vérifier l'alignement sans deviner.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'd' || e.key === 'D') driftEl.classList.toggle('active');
+  });
 
   // Première synchro dès le chargement : l'heure affichée est déjà corrigée et on
   // voit tout de suite si le service répond. Re-synchro juste avant le départ.

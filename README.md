@@ -54,7 +54,65 @@ La page se synchronise avec le serveur dès son ouverture, puis une seconde fois
 juste avant d'armer le décompte. Le statut de synchro est affiché en bas de
 l'écran de réglage.
 
-Le fichier vidéo reste local sur chaque PC — il n'est jamais envoyé nulle part.
+## Recalage pendant la lecture
+
+Démarrer les deux PC à la même seconde ne suffit pas : les deux machines ne
+décodent pas exactement au même rythme, et un tour de boucle fige l'écart accumulé
+au lieu de le rattraper. La page ne suppose donc jamais que « ça suit » — elle
+recalcule en continu la position due :
+
+```
+position attendue = (heure corrigée − heure de départ) modulo durée de la vidéo
+```
+
+**Un saut en pleine image se voit ; à la frontière de boucle, l'image change de
+toute façon.** Le recalage dur est donc réservé au rebouclage :
+
+| Situation | Action |
+|---|---|
+| Écart < 40 ms (~1 image) | rien |
+| Écart en cours de plan | vitesse à 0,98 ou 1,02 — rattrapage progressif, **aucun saut** |
+| Écart au rebouclage | saut à la position due, invisible puisque l'image change |
+| Écart > 2 s (PC qui a décroché) | saut immédiat : attendre la boucle laisserait des minutes de désynchro visible |
+
+La page sonde toutes les 250 ms, mais c'est pour **détecter le rebouclage dans les
+premières images du tour suivant**, pas pour corriger plus souvent. En marche
+normale elle ne fait rien.
+
+Trois réglages en haut du `<script>` de [`public/index.html`](public/index.html) :
+
+- `DRIFT_OK_MS` (40) — la zone morte.
+- `NUDGE_RATE` (0.02) — le rattrapage doux. **Mets-le à `0`** pour un recalage
+  strictement au rebouclage, sans jamais toucher à la vitesse.
+- `DRIFT_PANIC_MS` (2000) — le décrochage franc. **Mets-le à `Infinity`** pour
+  n'autoriser aucun saut ailleurs qu'à la boucle.
+
+### À savoir sur la précision
+
+La zone morte s'applique à chaque PC séparément : chacun se cale à ±40 ms de
+l'heure, donc l'écart **entre les deux** peut atteindre 80 ms. C'est invisible à
+l'œil (2 images), mais si les deux PC sortent du son dans la même pièce, 80 ms
+s'entend comme un écho. Dans ce cas : coupe le son d'un des deux, ou descends
+`DRIFT_OK_MS` à 15.
+
+Le calcul de l'écart est circulaire, donc la frontière de boucle (fin → début)
+n'est pas lue comme un écart d'une durée entière de vidéo. Comme la référence est
+l'heure et non « le temps écoulé depuis le démarrage », le nombre de tours déjà
+passés n'a aucune importance : les deux PC visent toujours la même image du même
+tour.
+
+Deux autres conséquences utiles :
+
+- Le décalage de démarrage est absorbé. Le décompte tourne à 250 ms et `play()`
+  a sa propre latence ; plutôt que de partir de 0 avec ce retard figé, la page se
+  place d'emblée à la position due.
+- L'horloge du PC est re-synchronisée sur le serveur chaque minute pendant la
+  lecture. Un échec réseau est sans conséquence : le dernier décalage connu reste
+  en place, jamais de retour brutal à zéro.
+
+**Vérifier sur place :** appuie sur la touche `d` pendant la lecture. Un petit
+indicateur affiche l'écart mesuré, la vitesse appliquée et le décalage serveur.
+Sur les deux PC, l'écart doit osciller autour de zéro à quelques dizaines de ms.
 
 ## Tester l'API
 
