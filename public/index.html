@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Synchro vidéo hommage</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000; color: #fff;
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  #setup {
+    height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px; overflow-y: auto;
+  }
+  h1 { font-size: 28px; margin-bottom: 4px; }
+  .sub { color: #aaa; margin-bottom: 24px; }
+  .step { margin: 16px 0; max-width: 460px; }
+  .step label { display:block; margin-bottom:8px; font-size:16px; color:#ddd; }
+  input[type="file"], input[type="time"] {
+    font-size: 16px; padding: 8px; background:#111; color:#fff;
+    border:1px solid #444; border-radius:6px; width: 100%;
+  }
+  .quick button { margin: 0 6px; }
+  button {
+    font-size: 18px; padding: 12px 22px; margin-top: 10px;
+    background: #1e6f3e; color: #fff; border: none; border-radius: 8px;
+    cursor: pointer;
+  }
+  button:disabled { background: #333; color: #777; cursor: not-allowed; }
+  button.secondary { background: #333; font-size: 14px; padding: 8px 14px; }
+  #clockNow { margin-top: 22px; color: #888; font-size: 15px; }
+  #fileName { margin-top: 6px; color: #7ecb9a; font-size: 14px; min-height: 18px; }
+  #syncStatus { margin-top: 10px; font-size: 14px; min-height: 18px; }
+  #syncStatus.ok { color: #7ecb9a; }
+  #syncStatus.off { color: #d98c3a; }
+
+  #waiting {
+    height: 100%; display: none; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: #000;
+  }
+  #waiting.active { display: flex; }
+  #countdown {
+    font-size: 96px; font-variant-numeric: tabular-nums;
+    font-weight: 600; letter-spacing: 2px;
+  }
+  #waiting p { color: #999; font-size: 18px; }
+  #targetDisplay { color: #fff; font-weight: 600; }
+
+  video {
+    display: none;
+    width: 100vw; height: 100vh; object-fit: contain;
+    background: #000;
+  }
+  video.active { display: block; }
+</style>
+</head>
+<body>
+
+<div id="setup">
+  <h1>Synchro vidéo hommage</h1>
+  <div class="sub">À faire pareil sur les deux ordinateurs</div>
+
+  <div class="step">
+    <label>1. Choisir le fichier vidéo (sur la clé USB)</label>
+    <input type="file" id="fileInput" accept="video/*">
+    <div id="fileName"></div>
+  </div>
+
+  <div class="step">
+    <label>2. Heure de départ — mets la MÊME heure sur les deux postes</label>
+    <input type="time" id="targetTime" step="1">
+    <div class="quick">
+      <button class="secondary" id="setPlus3">Départ dans 3 min</button>
+      <button class="secondary" id="setPlus5">Départ dans 5 min</button>
+      <button class="secondary" id="setPlus10">Départ dans 10 min</button>
+    </div>
+  </div>
+
+  <button id="prepareBtn" disabled>3. Préparer et attendre le départ</button>
+
+  <div id="syncStatus"></div>
+  <div id="clockNow"></div>
+</div>
+
+<div id="waiting">
+  <p>Départ programmé à <span id="targetDisplay"></span></p>
+  <div id="countdown">--:--</div>
+  <p>Heure actuelle : <span id="liveClock2"></span></p>
+</div>
+
+<video id="video" loop playsinline></video>
+
+<script>
+  // Le service de synchro est déployé avec cette page : même origine, donc chemin relatif.
+  // Si tu ouvres ce fichier depuis une clé USB (file://), remplace-le par l'URL complète
+  // du déploiement, ex. 'https://sync-video-hommage-xxxx.vercel.app/api/time'.
+  const SYNC_URL = '/api/time';
+
+  const fileInput = document.getElementById('fileInput');
+  const syncStatusEl = document.getElementById('syncStatus');
+  const targetTimeInput = document.getElementById('targetTime');
+  const prepareBtn = document.getElementById('prepareBtn');
+  const setupDiv = document.getElementById('setup');
+  const waitingDiv = document.getElementById('waiting');
+  const countdownEl = document.getElementById('countdown');
+  const targetDisplayEl = document.getElementById('targetDisplay');
+  const clockNowEl = document.getElementById('clockNow');
+  const liveClock2El = document.getElementById('liveClock2');
+  const fileNameEl = document.getElementById('fileName');
+  const video = document.getElementById('video');
+
+  let selectedFile = null;
+  let targetDate = null;
+  let countdownTimer = null;
+  let clockOffsetMs = 0; // correction à appliquer à Date.now() pour avoir l'heure "réelle"
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function correctedNow() { return Date.now() + clockOffsetMs; }
+  function nowStr() {
+    const d = new Date(correctedNow());
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  function refreshClocks() {
+    clockNowEl.textContent = 'Heure actuelle (corrigée) sur cet ordinateur : ' + nowStr();
+    liveClock2El.textContent = nowStr();
+  }
+  setInterval(refreshClocks, 1000);
+  refreshClocks();
+
+  function checkReady() {
+    prepareBtn.disabled = !(selectedFile && targetTimeInput.value);
+  }
+
+  fileInput.addEventListener('change', () => {
+    selectedFile = fileInput.files[0] || null;
+    fileNameEl.textContent = selectedFile ? ('Fichier choisi : ' + selectedFile.name) : '';
+    checkReady();
+  });
+
+  targetTimeInput.addEventListener('input', checkReady);
+
+  function setInMinutes(mins) {
+    const d = new Date(correctedNow() + mins * 60000);
+    targetTimeInput.value = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    checkReady();
+  }
+  document.getElementById('setPlus3').addEventListener('click', () => setInMinutes(3));
+  document.getElementById('setPlus5').addEventListener('click', () => setInMinutes(5));
+  document.getElementById('setPlus10').addEventListener('click', () => setInMinutes(10));
+
+  function parseTargetTime(value) {
+    const parts = value.split(':').map(Number);
+    const h = parts[0] || 0, m = parts[1] || 0, s = parts[2] || 0;
+    const d = new Date(correctedNow());
+    d.setHours(h, m, s, 0);
+    if (d.getTime() < correctedNow() - 60000) {
+      d.setDate(d.getDate() + 1);
+    }
+    return d;
+  }
+
+  // --- Synchro d'horloge via le serveur (style NTP simplifié) ---
+  async function syncWithServer() {
+    if (location.protocol === 'file:' && SYNC_URL.startsWith('/')) {
+      clockOffsetMs = 0;
+      syncStatusEl.textContent = 'Page ouverte en local — synchro par horloge locale des deux PC.';
+      syncStatusEl.className = 'off';
+      return;
+    }
+
+    syncStatusEl.textContent = 'Synchronisation avec le serveur...';
+    syncStatusEl.className = '';
+
+    const samples = [];
+    for (let i = 0; i < 5; i++) {
+      try {
+        const t0 = Date.now();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const resp = await fetch(SYNC_URL, { cache: "no-store", signal: controller.signal });
+        clearTimeout(timeout);
+        const t1 = Date.now();
+        const data = await resp.json();
+        const roundTrip = t1 - t0;
+        const estServerAtT1 = data.serverTime + roundTrip / 2;
+        samples.push({ roundTrip, offset: estServerAtT1 - t1 });
+      } catch (e) {
+        // ignore cet échantillon, on continue
+      }
+    }
+
+    if (samples.length === 0) {
+      clockOffsetMs = 0;
+      syncStatusEl.textContent = 'Serveur injoignable — repli sur l\'horloge locale des deux PC.';
+      syncStatusEl.className = 'off';
+      return;
+    }
+
+    samples.sort((a, b) => a.roundTrip - b.roundTrip);
+    clockOffsetMs = samples[0].offset;
+    syncStatusEl.textContent = 'Synchro serveur OK (décalage corrigé : ' + Math.round(clockOffsetMs) + ' ms).';
+    syncStatusEl.className = 'ok';
+  }
+
+  prepareBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    prepareBtn.disabled = true;
+    prepareBtn.textContent = 'Synchronisation...';
+    await syncWithServer();
+    prepareBtn.textContent = '3. Préparer et attendre le départ';
+
+    targetDate = parseTargetTime(targetTimeInput.value);
+
+    const url = URL.createObjectURL(selectedFile);
+    video.src = url;
+    video.muted = false;
+
+    video.play().then(() => {
+      video.pause();
+      video.currentTime = 0;
+    }).catch(() => {});
+
+    const el = document.documentElement;
+    if (el.requestFullscreen) { el.requestFullscreen().catch(() => {}); }
+
+    setupDiv.style.display = 'none';
+    waitingDiv.classList.add('active');
+    targetDisplayEl.textContent = pad(targetDate.getHours()) + ':' + pad(targetDate.getMinutes()) + ':' + pad(targetDate.getSeconds());
+
+    countdownTimer = setInterval(updateCountdown, 250);
+    updateCountdown();
+  });
+
+  function updateCountdown() {
+    const diffMs = targetDate.getTime() - correctedNow();
+    if (diffMs <= 0) {
+      clearInterval(countdownTimer);
+      startVideo();
+      return;
+    }
+    const totalSec = Math.ceil(diffMs / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    countdownEl.textContent = pad(mm) + ':' + pad(ss);
+  }
+
+  function startVideo() {
+    waitingDiv.classList.remove('active');
+    video.classList.add('active');
+    video.loop = true;
+    video.play().catch(() => {
+      video.addEventListener('click', () => video.play(), { once: true });
+    });
+    const el = document.documentElement;
+    if (el.requestFullscreen && !document.fullscreenElement) {
+      el.requestFullscreen().catch(() => {});
+    }
+  }
+
+  // Première synchro dès le chargement : l'heure affichée est déjà corrigée et on
+  // voit tout de suite si le service répond. Re-synchro juste avant le départ.
+  syncWithServer();
+</script>
+
+</body>
+</html>
